@@ -16,6 +16,7 @@ const parsing = @import("parsing/parsing.zig");
 pub const Delimiters = parsing.Delimiters;
 
 pub const ParseError = error{
+    DepthLimitExceeded,
     UnexpectedEof,
     UnexpectedCloseSection,
     InvalidDelimiters,

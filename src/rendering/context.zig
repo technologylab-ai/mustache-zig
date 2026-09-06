@@ -13,6 +13,7 @@ const Element = mustache.Element;
 const rendering = @import("rendering.zig");
 const ContextSource = rendering.ContextSource;
 
+const control = @import("budget.zig");
 const native_context = @import("contexts/native/context.zig");
 
 pub const Fields = @import("Fields.zig");
@@ -97,6 +98,7 @@ pub fn ContextIteratorType(comptime ContextInterface: type) type {
             sequence: struct {
                 context: *const ContextInterface,
                 path: Element.Path,
+                budget: ?*control.Budget,
                 state: union(enum) {
                     fetching: struct {
                         item: ContextInterface,
@@ -106,7 +108,8 @@ pub fn ContextIteratorType(comptime ContextInterface: type) type {
                 },
 
                 fn fetch(self: @This(), index: usize) ?ContextInterface {
-                    const result = self.context.get(self.path, index);
+                    const result = self.context.getBounded(self.path, index, self.budget);
+                    if (self.budget) |budget| if (budget.failure != null) return null;
 
                     return switch (result) {
                         .field => |item| item,
@@ -136,11 +139,16 @@ pub fn ContextIteratorType(comptime ContextInterface: type) type {
             path: Element.Path,
             item: ContextInterface,
         ) Iterator {
+            return initSequenceBounded(parent_ctx, path, item, null);
+        }
+
+        pub fn initSequenceBounded(parent_ctx: *const ContextInterface, path: Element.Path, item: ContextInterface, budget: ?*control.Budget) Iterator {
             return .{
                 .data = .{
                     .sequence = .{
                         .context = parent_ctx,
                         .path = path,
+                        .budget = budget,
                         .state = .{
                             .fetching = .{
                                 .item = item,

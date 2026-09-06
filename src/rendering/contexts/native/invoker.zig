@@ -24,6 +24,7 @@ const lambda = @import("lambda.zig");
 const LambdaInvokerType = lambda.LambdaInvokerType;
 
 const Writer = std.Io.Writer;
+const control = @import("../../budget.zig");
 
 pub fn InvokerType(
     comptime PartialsMap: type,
@@ -56,8 +57,10 @@ pub fn InvokerType(
                     data: anytype,
                     path: Element.Path,
                     index: ?usize,
+                    budget: ?*control.Budget,
                 ) TError!PathResolution {
-                    return find(.Root, action_param, data, path, index);
+                    if (!control.spend(budget, 1)) return .chain_broken;
+                    return find(.Root, action_param, data, path, index, budget);
                 }
 
                 fn find(
@@ -66,23 +69,25 @@ pub fn InvokerType(
                     data: anytype,
                     path: Element.Path,
                     index: ?usize,
+                    budget: ?*control.Budget,
                 ) TError!PathResolution {
+                    if (!control.spend(budget, 1)) return .chain_broken;
                     const Data = @TypeOf(data);
                     if (Data == void) return .chain_broken;
 
                     const ctx = Fields.getRuntimeValue(data);
 
                     if (comptime isRuntimeValue(@TypeOf(ctx))) {
-                        return dynamicFind(depth, action_param, ctx, path, index);
+                        return dynamicFind(depth, action_param, ctx, path, index, budget);
                     }
 
                     if (comptime lambda.isLambdaInvoker(Data)) {
                         return PathResolution{ .lambda = try action_fn(action_param, ctx) };
                     } else {
                         if (path.len > 0) {
-                            return recursiveFind(depth, Data, action_param, ctx, path[0], path[1..], index);
+                            return recursiveFind(depth, Data, action_param, ctx, path[0], path[1..], index, budget);
                         } else if (index) |current_index| {
-                            return iterateAt(Data, action_param, ctx, current_index);
+                            return iterateAt(Data, action_param, ctx, current_index, budget);
                         } else {
                             return PathResolution{ .field = try action_fn(action_param, ctx) };
                         }
@@ -108,10 +113,15 @@ pub fn InvokerType(
                     value: *const mustache.Value,
                     path: Element.Path,
                     index: ?usize,
+                    budget: ?*control.Budget,
                 ) TError!PathResolution {
+                    if (!control.spend(budget, 1)) return .chain_broken;
                     if (path.len > 0) {
-                        if (value.getPtr(path[0])) |found| {
-                            return dynamicFind(.Leaf, action_param, found, path[1..], index);
+                        if (value.* == .map) {
+                            for (value.map) |*field| {
+                                if (!control.spend(budget, 1) or !control.spend(budget, @min(field.name.len, path[0].len))) return .chain_broken;
+                                if (std.mem.eql(u8, field.name, path[0])) return dynamicFind(.Leaf, action_param, &field.value, path[1..], index, budget);
+                            }
                         }
                         return if (depth == .Root) .not_found_in_context else .chain_broken;
                     }
@@ -161,7 +171,9 @@ pub fn InvokerType(
                     current_path_part: []const u8,
                     next_path_parts: Element.Path,
                     index: ?usize,
+                    budget: ?*control.Budget,
                 ) TError!PathResolution {
+                    if (!control.spend(budget, 1)) return .chain_broken;
                     const Data = @TypeOf(data);
                     switch (@typeInfo(TValue)) {
                         .@"struct" => {
@@ -173,6 +185,7 @@ pub fn InvokerType(
                                 current_path_part,
                                 next_path_parts,
                                 index,
+                                budget,
                             );
                         },
                         .pointer => |info| switch (info.size) {
@@ -184,6 +197,7 @@ pub fn InvokerType(
                                 current_path_part,
                                 next_path_parts,
                                 index,
+                                budget,
                             ),
                             .slice => {
                                 //Slice supports the "len" field,
@@ -209,6 +223,7 @@ pub fn InvokerType(
                                     current_path_part,
                                     next_path_parts,
                                     index,
+                                    budget,
                                 );
                             }
                         },
@@ -237,15 +252,26 @@ pub fn InvokerType(
                     current_path_part: []const u8,
                     next_path_parts: Element.Path,
                     index: ?usize,
+                    budget: ?*control.Budget,
                 ) TError!PathResolution {
+                    if (!control.spend(budget, 1)) return .chain_broken;
                     const fields = std.meta.fields(TValue);
                     inline for (fields) |field| {
+                        if (!control.spend(budget, 1) or !control.spend(budget, @min(field.name.len, current_path_part.len))) return .chain_broken;
                         if (std.mem.eql(u8, field.name, current_path_part)) {
-                            return try find(.Leaf, action_param, Fields.getField(data, field.name), next_path_parts, index);
+                            if (comptime field.is_comptime and !Fields.byValue(field.type)) {
+                                // Comptime fields have no address in the runtime struct.
+                                // Static storage preserves the borrow through section rendering.
+                                const Static = struct {
+                                    const value: field.type = field.defaultValue().?;
+                                };
+                                return try find(.Leaf, action_param, &Static.value, next_path_parts, index, budget);
+                            }
+                            return try find(.Leaf, action_param, Fields.getField(data, field.name), next_path_parts, index, budget);
                         }
                     } else {
                         if (next_path_parts.len == 0) {
-                            return try findLambdaPath(depth, TValue, action_param, data, current_path_part);
+                            return try findLambdaPath(depth, TValue, action_param, data, current_path_part, budget);
                         } else {
                             return if (depth == .Root) .not_found_in_context else .chain_broken;
                         }
@@ -258,9 +284,12 @@ pub fn InvokerType(
                     action_param: anytype,
                     data: anytype,
                     current_path_part: []const u8,
+                    budget: ?*control.Budget,
                 ) TError!PathResolution {
+                    if (!control.spend(budget, 1)) return .chain_broken;
                     const decls = comptime std.meta.declarations(TValue);
                     inline for (decls) |decl| {
+                        if (!control.spend(budget, 1) or !control.spend(budget, @min(decl.name.len, current_path_part.len))) return .chain_broken;
                         const has_fn = comptime meta.hasFn(TValue, decl.name);
                         if (has_fn) {
                             const bound_fn = @field(TValue, decl.name);
@@ -316,13 +345,16 @@ pub fn InvokerType(
                     action_param: anytype,
                     data: anytype,
                     index: usize,
+                    budget: ?*control.Budget,
                 ) TError!PathResolution {
+                    if (!control.spend(budget, 1)) return .chain_broken;
                     const Data = @TypeOf(data);
                     switch (@typeInfo(TValue)) {
                         .@"struct" => |info| {
                             if (info.is_tuple) {
                                 const derref = comptime stdx.isSingleItemPtr(Data);
                                 inline for (0..info.fields.len) |i| {
+                                    if (!control.spend(budget, 1)) return .chain_broken;
                                     if (index == i) {
                                         return PathResolution{
                                             .field = try action_fn(
@@ -350,6 +382,7 @@ pub fn InvokerType(
                                     action_param,
                                     Fields.lhs(Data, data),
                                     index,
+                                    budget,
                                 );
                             },
                             .slice => {
@@ -400,6 +433,7 @@ pub fn InvokerType(
                                     action_param,
                                     Fields.lhs(Data, data),
                                     index,
+                                    budget,
                                 )
                             else
                                 .iterator_consumed;
@@ -422,12 +456,17 @@ pub fn InvokerType(
             path: Element.Path,
             index: ?usize,
         ) PathResolutionType(Context) {
+            return getBounded(data, path, index, null);
+        }
+
+        pub inline fn getBounded(data: anytype, path: Element.Path, index: ?usize, budget: ?*control.Budget) PathResolutionType(Context) {
             const GetPathInvoker = PathInvokerType(error{}, Context, getAction);
             return GetPathInvoker.call(
                 {},
                 data,
                 path,
                 index,
+                budget,
             ) catch unreachable;
         }
 
@@ -447,6 +486,7 @@ pub fn InvokerType(
                 data,
                 path,
                 null,
+                data_render.budget,
             );
         }
 
@@ -460,6 +500,7 @@ pub fn InvokerType(
                 data_render,
                 data,
                 path,
+                null,
                 null,
             ) catch unreachable;
         }
@@ -482,6 +523,7 @@ pub fn InvokerType(
                 data,
                 path,
                 null,
+                data_render.budget,
             );
         }
 

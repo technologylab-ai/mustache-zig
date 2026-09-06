@@ -1,51 +1,73 @@
-name: Matrix Build
+name: Zig 0.16 verification
+
 on:
   push:
-    branches: [ main ]
   pull_request:
-    branches: [ main ]
-  schedule:
-    - cron: 0 9 * * *
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mustache-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  native:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-latest, windows-latest]
-        include:
-          - os: windows-latest
-            crlf: fix
-          - os: ubuntu-22.04
-            coverage: -Dtest-coverage=true
-    runs-on: ${{matrix.os}}
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    env:
+      PYTHONUTF8: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
     steps:
-      - name: Force Line Endings for Windows
-        if: ${{ matrix.crlf }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install exact checksum-verified Zig
+        shell: python
         run: |
-          git config --global core.autocrlf false
-          git config --global core.eol lf
-
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v2
+          import hashlib, json, os, pathlib, platform, tarfile, urllib.request, zipfile
+          version = pathlib.Path('.zig-version').read_text().strip()
+          assert version == '0.16.0'
+          architecture = {'AMD64': 'x86_64', 'x86_64': 'x86_64', 'arm64': 'aarch64', 'aarch64': 'aarch64'}[platform.machine()]
+          system = {'Windows': 'windows', 'Linux': 'linux', 'Darwin': 'macos'}[platform.system()]
+          with urllib.request.urlopen('https://ziglang.org/download/index.json', timeout=30) as response:
+              artifact = json.load(response)[version][f'{architecture}-{system}']
+          assert artifact['tarball'].startswith('https://ziglang.org/')
+          directory = pathlib.Path(os.environ['RUNNER_TEMP']) / 'mustache-zig'
+          directory.mkdir()
+          archive = directory / ('zig.zip' if system == 'windows' else 'zig.tar.xz')
+          with urllib.request.urlopen(artifact['tarball'], timeout=180) as response:
+              archive.write_bytes(response.read())
+          assert hashlib.sha256(archive.read_bytes()).hexdigest() == artifact['shasum']
+          if system == 'windows':
+              with zipfile.ZipFile(archive) as package:
+                  package.extractall(directory)
+          else:
+              with tarfile.open(archive) as package:
+                  package.extractall(directory, filter='data')
+          compiler, = directory.glob('*/zig.exe' if system == 'windows' else '*/zig')
+          with open(os.environ['GITHUB_PATH'], 'a') as path:
+              path.write(str(compiler.parent) + '\n')
+      - name: Verify Debug and ReleaseSafe
+        shell: python
+        run: |
+          import os, pathlib, platform, subprocess
+          packet = pathlib.Path(os.environ['RUNNER_TEMP']) / 'mustache-evidence'
+          packet.mkdir()
+          (packet / 'environment.txt').write_text(platform.platform() + '\n' + platform.machine() + '\n' + os.environ['GITHUB_SHA'] + '\n' + subprocess.check_output(['zig', 'version'], text=True))
+          for mode in ['Debug', 'ReleaseSafe']:
+              result = subprocess.run(['zig', 'build', 'verify', '-Doptimize=' + mode, '-j2', '--summary', 'all'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
+              (packet / (mode + '.log')).write_bytes(result.stdout)
+              print(result.stdout.decode('utf-8', errors='replace'))
+              result.check_returncode()
+      - name: Upload native receipts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          version: 0.16.0
-
-      - name: Download kcov
-        if: ${{ matrix.os == 'ubuntu-22.04' }}
-        run: |
-          sudo apt-get install -y kcov
-
-      # No comptime tests for now.
-      - name: Run Tests
-        run: |
-          zig version
-          zig build test -Dcomptime-tests=false ${{ matrix.coverage }}
-
-      - name: Upload Codecov
-        if: ${{ matrix.os == 'ubuntu-22.04' }}
-        uses: codecov/codecov-action@v4
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
+          name: mustache-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mustache-evidence
+          if-no-files-found: warn
+          retention-days: 14

@@ -1,258 +1,96 @@
-# MUSTACHE-ZIG
-# [{{mustache}}](https://mustache.github.io/) templates for [Zig](https://ziglang.org/).
+# Mustache for Zig 0.16.0
 
-[![made with Zig](https://img.shields.io/badge/made%20with%20%E2%9D%A4%20-Zig-orange)](https://ziglang.org/)
-[![Matrix Build](https://github.com/batiati/mustache-zig/actions/workflows/build.yml/badge.svg)](https://github.com/batiati/mustache-zig/actions/workflows/build.yml)
-[![codecov](https://codecov.io/gh/batiati/mustache-zig/branch/main/graph/badge.svg)](https://codecov.io/gh/batiati/mustache-zig)
-[![license mit](https://img.shields.io/github/license/batiati/mustache-zig)](https://github.com/batiati/mustache-zig/blob/main/LICENSE.txt)
+A pure Zig, MIT-licensed Mustache library with cached templates and standard
+`std.Io.Writer` output. This fork adds **bounded cached rendering** for
+[Baz](https://github.com/technologylab-ai/baz): explicit work/depth limits,
+parser recursion guards, and independent official-core and Zap compatibility tests.
 
-![logo](mustache.png)
+Based on [diogok's Zig 0.16 port](https://github.com/diogok/mustache-zig/tree/eb023612e85774861e6a9be18e674a497a340f0f)
+of [batiati/mustache-zig](https://github.com/batiati/mustache-zig).
+Thank you to the original authors and contributors. Their [MIT license](LICENSE.txt)
+and source attribution remain intact.
 
-Requires Zig 0.16.0
+## Parse once, render into your writer
 
-## [Read more on Zig News](https://zig.news/batiati/growing-a-mustache-with-zig-di4)
+Import the `mustache` module from this package. Use **exact Zig 0.16.0**.
 
-## Features
-
-✓ [Comments](https://github.com/mustache/spec/blob/master/specs/comments.yml) `{{! Mustache is awesome }}`.
-
-✓ Custom [delimiters](https://github.com/mustache/spec/blob/master/specs/delimiters.yml) `{{=[ ]=}}`.
-
-✓ [Interpolation](https://github.com/mustache/spec/blob/master/specs/interpolation.yml) of common types, such as strings, enums, bools, optionals, pointers, integers, floats and JSON objects into `{{variables}`.
-
-✓ [Unescaped interpolation](https://github.com/mustache/spec/blob/b2aeb3c283de931a7004b5f7a2cb394b89382369/specs/interpolation.yml#L52) with `{{{tripple-mustache}}}` or `{{&ampersant}}`.
-
-✓ Rendering [sections](https://github.com/mustache/spec/blob/master/specs/sections.yml) `{{#foo}} ... {{/foo}}`.
-
-✓ [Section iterator](https://github.com/mustache/spec/blob/b2aeb3c283de931a7004b5f7a2cb394b89382369/specs/sections.yml#L133) over slices, arrays and tuples `{{slice}} ... {{/slice}}`.
-
-✓ Rendering [inverted sections](https://github.com/mustache/spec/blob/master/specs/inverted.yml) `{{^foo}} ... {{/foo}}`.
-
-✓ [Lambdas](https://github.com/mustache/spec/blob/master/specs/~lambdas.yml) expansion.
-
-✓ Rendering [partials](https://github.com/mustache/spec/blob/master/specs/partials.yml) `{{>file.html}}`.
-
-☐ Rendering [parents and blocks](https://github.com/mustache/spec/blob/master/specs/~inheritance.yml) `{{<file.html}}` and `{{$block}}`.
-
-## Full spec compliant
-
-✓ All implemented features passes the tests from [mustache spec](https://github.com/mustache/spec).
-
-## Examples
-
-Render from strings, files and pre-loaded templates.
-See the [source code](https://github.com/batiati/mustache-zig/blob/main/samples/zig/src/main.zig) for more details.
-
-### Runtime parser
-
-```Zig
-
+```zig
 const std = @import("std");
 const mustache = @import("mustache");
 
 pub fn main(init: std.process.Init) !void {
-    const template =
-        \\Hello {{name}} from Zig
-        \\Supported features:
-        \\{{#features}}
-        \\  - {{name}}
-        \\{{/features}}
-    ;
-
-    const data = .{
-        .name = "friends",
-        .features = .{
-            .{ .name = "interpolation" },
-            .{ .name = "sections" },
-            .{ .name = "delimiters" },
-            .{ .name = "partials" },
-        },
+    const parsed = try mustache.parseText(init.gpa, "Hello {{name}}!", .{}, .{
+        .copy_strings = true,
+        .features = .{ .lambdas = .disabled },
+    });
+    const template = switch (parsed) {
+        .success => |value| value,
+        .parse_error => return error.InvalidTemplate,
     };
+    defer template.deinit(init.gpa);
 
-    const allocator = init.gpa;
-    const result = try mustache.allocRenderText(allocator, template, data);
-    defer allocator.free(result);
-
-    // Render directly to stdout via the new std.Io.Writer interface
-    var buf: [4096]u8 = undefined;
-    var stdout = std.Io.File.stdout().writer(init.io, &buf);
-    defer stdout.interface.flush() catch {};
-    try stdout.interface.writeAll(result);
+    var output: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&output);
+    try mustache.renderBounded(template, .{ .name = "Zig" }, &writer, .{});
+    std.debug.assert(std.mem.eql(u8, writer.buffered(), "Hello Zig!"));
 }
-
 ```
 
-### Comptime parser
+For explicit cached partials:
 
-```Zig
-
-const std = @import("std");
-const mustache = @import("mustache");
-
-pub fn main(init: std.process.Init) !void {
-    const template_text = "It's a comptime loaded template, with a {{value}}";
-    const comptime_template = comptime mustache.parseComptime(template_text, .{}, .{});
-
-    const Data = struct { value: []const u8 };
-    const data: Data = .{
-        .value = "runtime value",
-    };
-
-    const allocator = init.gpa;
-    const result = try mustache.allocRender(allocator, comptime_template, data);
-    defer allocator.free(result);
-
-    try std.testing.expectEqualStrings(
-        "It's a comptime loaded template, with a runtime value",
-        result,
-    );
-}
-
+```zig
+try mustache.renderPartialsBounded(template, partials, data, writer, .{
+    .max_depth = 64,
+    .max_work = 1_000_000,
+});
 ```
 
+`partials` can be a tuple/slice of name/template pairs, or a standard
+`std.StringHashMap(Template)` / `std.StringHashMapUnmanaged(Template)`. Partials are parsed independently with their
+own starting delimiters. Typed Zig arrays, slices, structs, optionals and
+numbers work directly. For runtime-shaped data, use `mustache.Value`; convert
+`std.json.Value` explicitly as shown in [the specification runner](tests/spec.zig).
+Missing values render empty.
 
-### JSON support
+## Bounded API contract
 
-```Zig
+- Parsing takes a caller allocator. Use a fixed startup allocator and a source
+  size limit when a hard startup memory bound is required. Parser section and
+  dotted-path recursion have a hard depth limit of 128.
+- The cached bounded renderer takes **no allocator**, performs no file I/O, and
+  does not mutate templates. Share immutable templates across calls; each call
+  needs exclusive writer storage. Keep borrowed template strings and data alive.
+- A shared budget charges nodes, iterations (including empty sections), context
+  and partial lookup, and source/output bytes. `max_work` is an implementation
+  budget, not a time measurement. Runtime depth is at most 128.
+- A limit returns `WorkLimitExceeded` or `DepthLimitExceeded`. A failed output
+  writer returns `WriteFailed`. An error can leave a prefix in the destination;
+  discard it before publishing if partial output is unacceptable.
+- Parse with lambdas disabled. Lambda-enabled templates, inheritance/blocks,
+  and dynamic partial names are outside the bounded API and return an error.
+- Core Mustache interpolation escapes HTML. Raw interpolation bypasses it;
+  neither operation validates application-specific URLs or script contexts.
 
-const std = @import("std");
-const mustache = @import("mustache");
+The inherited `render`, `allocRender`, `renderText`, file-loading, lambda and
+comptime APIs remain available for existing consumers. **They do not acquire
+these cached-render bounds.** Optional FFI/sample projects are inherited material,
+not part of this fork's bounded-runtime qualification. Baz uses only the pure
+Zig cached path and adds aggregate template storage/source/element limits.
 
-pub fn main(init: std.process.Init) !void {
-    const allocator = init.gpa;
+## Verification
 
-    // Parsing an arbitrary (dynamic) json string:
-    const json_source =
-        \\{
-        \\   "name": "friends"
-        \\}
-    ;
-    var json = try std.json.parseFromSlice(
-        std.json.Value,
-        allocator,
-        json_source,
-        .{},
-    );
-    defer json.deinit();
-
-    const template = "Hello {{name}} from Zig";
-    const result = try mustache.allocRenderText(allocator, template, json.value);
-    defer allocator.free(result);
-
-    try std.testing.expectEqualStrings("Hello friends from Zig", result);
-}
-
+```sh
+zig build verify -Doptimize=Debug -j2
+zig build verify -Doptimize=ReleaseSafe -j2
+zig build check -Dtarget=x86_64-windows -Doptimize=ReleaseSafe -j2
 ```
 
-### FFI Interface
+`verify` runs the inherited runtime/unit suite, focused budget/parser regressions,
+**all 136 official core cases** with normal and exact-capacity output, and four
+original Zap compatibility/allocator tests. The core runner skips no cases.
+Upstream comptime tests remain disabled by default and report their skips
+separately; optional Mustache specification modules are explicitly excluded.
+Fixture revisions, hashes, counts and MIT licenses are in [tests/spec](tests/spec/README.md).
 
-Mustache-zig exports a FFI interface to be consumed by other languages
-
-For more details: 
-
-- [C sample](samples/c/sample.c)
-
-- [C# sample](samples/dotnet/mustache.samples/Program.cs)
-
-## Customizable use
-
-There is no "one size fits all", but the mustache-zig API is intended to provide great flexibility to cover many use cases.
- 
-[![diagram](docs/diagram.svg)](https://raw.githubusercontent.com/batiati/mustache-zig/main/docs/diagram.svg)
-
-## Benchmarks.
-
-There are [some benchmark tests](benchmark/src/ramhorns_bench.zig) inspired by the excellent [Ramhorns](https://github.com/maciejhirsz/ramhorns)'s benchmarks, comparing the performance of most popular **Rust** template engines.
-
-1. Rendering to a new allocated string 1 million times
-
-    |                                                               | Total time | ns/iter  | MB/s      
-    ----------------------------------------------------------------|------------|----------|-----------
-    |[Ramhorns 0.14.0](https://crates.io/crates/ramhorns)           | 0,040s     |    40 ns | 2425 MB/s
-    |[Askama 0.9](https://crates.io/crates/askama)                  | 0,136s     |   136 ns |  713 MB/s
-    |[Tera 1.2.0](https://crates.io/crates/tera)                    | 0,308s     |   308 ns |  314 MB/s
-    |[Mustache 0.9](https://crates.io/crates/mustache)              | 0,363s     |   363 ns |  267 MB/s
-    |[Handlebars 3.1.0-beta.2](https://crates.io/crates/handlebars) | 1,833s     | 1,833 ns |   52 MB/s
-
-2. Parsing a template 1 million times
-
-    |                                                               | Total time | ns/iter   | MB/s      
-    ----------------------------------------------------------------|------------|-----------|-----------
-    |[Ramhorns 0.14.0](https://crates.io/crates/ramhorns)           |  0,317s    |    317 ns |  492 MB/s
-    |[Mustache 0.9](https://crates.io/crates/mustache)              |  5,863s    |  5,863 ns |   26 MB/s
-    |[Handlebars 3.1.0-beta.2](https://crates.io/crates/handlebars) | 11,797s    | 11,797 ns |   13 MB/s
-
-
-_*All benchmarks were executed using `cargo bench` on a Intel i7-1185G7 @ 3.00GHz, Linux kernel 5.17_
-
->For comparision with mustache-zig, refer to "Rendering to a new allocated string 1 million times" and "Parsing a template 1 million times" sections bellow.
-### Mustache vs Zig's fmt
-
-The same benchmark was implemented in Zig for both mustache-zig and Zig's `std.fmt`.
-
-We can assume that Zig's `std.fmt` is the **fastest** possible way to render a simple string using Zig. [This benchmark](benchmark/src/ramhorns_bench.zig) shows how much **slower** a mustache template is rendered when compared with the same template rendered by Zig's `std.fmt`.
-
-1. Rendering to a pre-allocated buffer 1 million times
-
-    |               | Total time | ns/iter | MB/s      | Penality
-    ----------------|------------|---------|-----------|-------
-    |Zig fmt        | 0.042s     | 42 ns   | 2596 MB/s | -- 
-    |mustache-zig   | 0.094s     | 94 ns   | 1149 MB/s | 2.260x slower
-
-
-2. Rendering to a new allocated string 1 million times
-
-    |               | Total time | ns/iter | MB/s      | Penality
-    ----------------|------------|---------|-----------|-------
-    |Zig fmt        | 0.058s     |  58 ns  | 1869 MB/s | -- 
-    |mustache-zig   | 0.167s     | 167 ns  |  645 MB/s | 2.897x slower
-
-
-3. Rendering to a local file 1 million times
-
-    |               | Total time | ns/iter | MB/s      | Penality
-    ----------------|------------|---------|-----------|-------
-    |Zig fmt        | 0.079s     |  79 ns  | 1367 MB/s | -- 
-    |mustache-zig   | 0.125s     | 125 ns  |  862 MB/s | 1.586x slower
-
-
-4. Parsing a template 1 million times
-
-    |               | Total time | ns/iter  | MB/s      
-    ----------------|------------|----------|-----------
-    |mustache-zig   | 1.380s     | 1,380 ns |  182 MB/s 
-
-
-_*All benchmarks were compiled as ReleaseSafe, and executed on a Intel i7-1185G7 @ 3.00GHz, Linux kernel 5.17_
-
-### Memory benchmarks
-
-Mustache templates are well known for HTML templating, but it's useful to render any kind of dynamic document, and potentially load templates from untrusted or user-defined sources.
-
-So, it's also important to be able to deal with multi-megabyte inputs without eating all your RAM.
-
-```Zig
-
-    // 32KB should be enough memory for this job
-    // 16KB if we don't need to support lambdas 😅
-    var plenty_of_memory: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
-    plenty_of_memory.requested_memory_limit = 32 * 1024;
-    defer _ = plenty_of_memory.deinit();
-
-    // The new std.Io interface threads I/O through file-related APIs.
-    try mustache.renderFile(
-        plenty_of_memory.allocator(),
-        init.io,
-        "10MB_file.mustache",
-        ctx,
-        out_writer, // *std.Io.Writer
-    );
-
-```
-
-## Licensing
-
-- MIT
-
-- Mustache is Copyright (C) 2009 Chris Wanstrath
-Original CTemplate by Google
+CI verifies Debug and ReleaseSafe natively on Linux, macOS and Windows using
+checksum-verified Zig 0.16.0. Cross-compilation is compilation evidence only.

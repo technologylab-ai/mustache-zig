@@ -35,6 +35,30 @@ const Writer = std.Io.Writer;
 
 const FileError = Io.File.OpenError || Io.File.ReadStreamingError;
 const BufError = Writer.Error;
+const control = @import("budget.zig");
+pub const RenderLimits = control.Limits;
+pub const BoundedRenderError = control.Failure || Allocator.Error || Writer.Error;
+
+/// Renders a cached template with finite work and stack limits.
+/// Parsing must disable lambdas. The writer can contain a prefix after failure.
+pub fn renderBounded(template: Template, data: anytype, writer: *Writer, limits: RenderLimits) BoundedRenderError!void {
+    return renderPartialsBounded(template, {}, data, writer, limits);
+}
+
+/// Templates, partials, and data remain borrowed until this call returns.
+/// This path does not allocate or perform filesystem operations.
+pub fn renderPartialsBounded(template: Template, partials: anytype, data: anytype, writer: *Writer, limits: RenderLimits) BoundedRenderError!void {
+    if (template.options.features.lambdas != .disabled) return error.UnsupportedFeature;
+    var budget = try control.Budget.init(limits);
+    var bounded_writer = control.Writer{ .destination = writer, .budget = &budget };
+    const options = RenderOptions{ .template = .{ .context_misses = .empty } };
+    const PartialsMap = map.PartialsMapType(@TypeOf(partials), options);
+    const RenderEngine = RenderEngineType(.native, PartialsMap, options);
+    RenderEngine.renderWithBudget(template, data, &bounded_writer.interface, PartialsMap.init(null, partials), &budget) catch |err| {
+        return budget.failure orelse err;
+    };
+    if (budget.failure) |err| return err;
+}
 
 pub const ContextSource = enum {
     native,
@@ -736,6 +760,8 @@ pub fn RenderEngineType(
             pub const Error = Allocator.Error || Writer.Error;
 
             out_writer: *Writer,
+            budget: ?*control.Budget = null,
+            is_template_text: bool = false,
             io: if (options == .file) Io else void = if (options == .file) undefined else {},
             stack: *const ContextStack,
             partials_map: PartialsMap,
@@ -797,30 +823,63 @@ pub fn RenderEngineType(
             inline fn preserveLineBreaksAndIndentation(self: DataRender) bool {
                 return !PartialsMap.isEmpty() and
                     switch (options) {
-                    .template => self.template_options.features.preserve_line_breaks_and_indentation,
-                    .string => |string| string.features.preserve_line_breaks_and_indentation,
-                    .file => |file| file.features.preserve_line_breaks_and_indentation,
-                };
+                        .template => self.template_options.features.preserve_line_breaks_and_indentation,
+                        .string => |string| string.features.preserve_line_breaks_and_indentation,
+                        .file => |file| file.features.preserve_line_breaks_and_indentation,
+                    };
+            }
+
+            pub fn charge(self: *DataRender, amount: usize) Writer.Error!void {
+                if (!control.spend(self.budget, amount)) return error.WriteFailed;
+            }
+
+            fn checkBudget(self: *DataRender) Writer.Error!void {
+                if (self.budget) |budget| if (budget.failure != null) return error.WriteFailed;
+            }
+
+            fn checkPath(self: *DataRender, path: Element.Path) Writer.Error!void {
+                if (self.budget) |budget| {
+                    if (path.len > control.hard_max_depth) {
+                        _ = budget.fail(error.DepthLimitExceeded);
+                        return error.WriteFailed;
+                    }
+                }
+                try self.charge(path.len);
+                for (path) |part| try self.charge(part.len);
             }
 
             fn renderLevel(
                 self: *DataRender,
                 elements: []const Element,
             ) (Allocator.Error || Writer.Error)!void {
+                if (self.budget) |budget| if (!budget.enter()) return error.WriteFailed;
+                defer if (self.budget) |budget| budget.leave();
                 var index: usize = 0;
                 while (index < elements.len) {
+                    try self.charge(1);
                     const element = elements[index];
                     index += 1;
 
                     switch (element) {
-                        .static_text => |content| _ = try self.write(content, .unescaped),
+                        .static_text => |content| {
+                            const previous = self.is_template_text;
+                            self.is_template_text = true;
+                            defer self.is_template_text = previous;
+                            try self.write(content, .unescaped);
+                        },
                         .interpolation => |path| try self.interpolate(path, .escaped),
                         .unescaped_interpolation => |path| try self.interpolate(path, .unescaped),
                         .section => |section| {
+                            if (section.children_count > elements.len - index) {
+                                if (self.budget) |budget| _ = budget.fail(error.InvalidTemplate);
+                                return error.WriteFailed;
+                            }
                             const section_children = elements[index .. index + section.children_count];
                             index += section.children_count;
 
+                            try self.checkPath(section.path);
                             var resolve_path = self.getIterator(section.path);
+                            try self.checkBudget();
                             if (resolve_path) |*iterator| {
                                 if (self.lambdasSupported()) {
                                     if (iterator.lambda()) |lambda_ctx| {
@@ -838,7 +897,12 @@ pub fn RenderEngineType(
                                         continue;
                                     }
                                 }
+                                if (self.budget != null and iterator.lambda() != null) {
+                                    _ = self.budget.?.fail(error.UnsupportedFeature);
+                                    return error.WriteFailed;
+                                }
                                 while (iterator.next()) |item_ctx| {
+                                    try self.charge(1);
                                     const current_level = self.stack;
                                     const next_level = ContextStack{
                                         .parent = current_level,
@@ -850,29 +914,44 @@ pub fn RenderEngineType(
 
                                     try self.renderLevel(section_children);
                                 }
+                                try self.checkBudget();
                             }
                         },
                         .inverted_section => |section| {
+                            if (section.children_count > elements.len - index) {
+                                if (self.budget) |budget| _ = budget.fail(error.InvalidTemplate);
+                                return error.WriteFailed;
+                            }
                             const section_children = elements[index .. index + section.children_count];
                             index += section.children_count;
 
                             // Lambdas aways evaluate as "true" for inverted section
                             // Broken paths, empty lists, null and false evaluates as "false"
 
-                            const truthy = if (self.getIterator(section.path)) |iterator|
-                                iterator.truthy()
-                            else
-                                false;
+                            try self.checkPath(section.path);
+                            const truthy = if (self.getIterator(section.path)) |iterator| result: {
+                                if (self.budget != null and iterator.lambda() != null) {
+                                    _ = self.budget.?.fail(error.UnsupportedFeature);
+                                    return error.WriteFailed;
+                                }
+                                break :result iterator.truthy();
+                            } else false;
 
+                            try self.checkBudget();
                             if (!truthy) {
                                 try self.renderLevel(section_children);
                             }
                         },
 
                         .partial => |partial| {
+                            if (self.budget != null and std.mem.startsWith(u8, partial.key, "*")) {
+                                _ = self.budget.?.fail(error.UnsupportedFeature);
+                                return error.WriteFailed;
+                            }
                             if (comptime PartialsMap.isEmpty()) continue;
 
-                            if (self.partials_map.get(partial.key)) |partial_template| {
+                            try self.charge(partial.key.len);
+                            if (self.partials_map.getWithBudget(partial.key, self.budget)) |partial_template| {
                                 if (self.preserveLineBreaksAndIndentation()) {
                                     if (partial.indentation) |value| {
                                         const prev_has_pending = self.indentation_queue.has_pending;
@@ -892,10 +971,16 @@ pub fn RenderEngineType(
 
                                 try self.renderLevelPartials(partial_template);
                             }
+                            try self.checkBudget();
                         },
 
-                        //TODO Parent, Block
-                        else => {},
+                        // Optional inheritance remains outside the bounded core.
+                        else => {
+                            if (self.budget) |budget| {
+                                _ = budget.fail(error.UnsupportedFeature);
+                                return error.WriteFailed;
+                            }
+                        },
                     }
                 }
             }
@@ -908,6 +993,10 @@ pub fn RenderEngineType(
 
                 switch (options) {
                     .template => {
+                        if (self.budget != null and partial_template.options.features.lambdas != .disabled) {
+                            _ = self.budget.?.fail(error.UnsupportedFeature);
+                            return error.WriteFailed;
+                        }
                         try self.render(partial_template.elements);
                     },
                     .string, .file => {
@@ -916,16 +1005,18 @@ pub fn RenderEngineType(
                 }
             }
 
-
             fn interpolate(
                 self: *DataRender,
                 path: Element.Path,
                 escape: Escape,
             ) (Allocator.Error || Writer.Error)!void {
+                try self.checkPath(path);
                 var level: ?*const ContextStack = self.stack;
 
                 while (level) |current| : (level = current.parent) {
+                    try self.charge(1);
                     const path_resolution = try current.ctx.interpolate(self, path, escape);
+                    try self.checkBudget();
 
                     switch (path_resolution) {
                         .field => {
@@ -934,7 +1025,10 @@ pub fn RenderEngineType(
                         },
 
                         .lambda => {
-
+                            if (self.budget) |budget| {
+                                _ = budget.fail(error.UnsupportedFeature);
+                                return error.WriteFailed;
+                            }
                             // Expand the lambda against the current context and break the loop
                             const expand_result = try current.ctx.expandLambda(self, path, "", escape, .{});
                             assert(expand_result == .lambda);
@@ -961,7 +1055,9 @@ pub fn RenderEngineType(
                 var level: ?*const ContextStack = self.stack;
 
                 while (level) |current| : (level = current.parent) {
-                    switch (current.ctx.iterator(path)) {
+                    if (!control.spend(self.budget, 1)) return null;
+                    // The iterator retains this budget through its context values.
+                    switch (current.ctx.iteratorBounded(path, self.budget)) {
                         .field => |found| return found,
 
                         .lambda => |found| return found,
@@ -1018,13 +1114,13 @@ pub fn RenderEngineType(
                     .bool => try self.flushToWriter(writer, if (value) "true" else "false", escape),
                     .int, .comptime_int => {
                         var buf: [128]u8 = undefined;
-                        const result = std.fmt.bufPrint(&buf, "{d}", .{value}) catch unreachable;
+                        const result = std.fmt.bufPrint(&buf, "{d}", .{value}) catch return error.WriteFailed;
                         try self.flushToWriter(writer, result, escape);
                     },
                     .float, .comptime_float => {
                         var buf: [128]u8 = undefined;
                         var w: Writer = .fixed(&buf);
-                        w.print("{d}", .{value}) catch unreachable;
+                        w.print("{d}", .{value}) catch return error.WriteFailed;
                         try self.flushToWriter(writer, w.buffered(), escape);
                     },
                     .@"enum" => try self.flushToWriter(writer, @tagName(value), escape),
@@ -1063,6 +1159,7 @@ pub fn RenderEngineType(
                 value: []const u8,
                 comptime escape: Escape,
             ) Writer.Error!void {
+                try self.charge(value.len);
                 const escaped = comptime escape == .escaped;
                 const indentation_supported = comptime !PartialsMap.isEmpty();
 
@@ -1081,7 +1178,7 @@ pub fn RenderEngineType(
                             // Supports both \n and \r\n
 
                             if (self.indentation_queue.has_pending) {
-                                defer self.indentation_queue.has_pending = false;
+                                self.indentation_queue.has_pending = false;
 
                                 if (char_index > index) {
                                     const slice = value[index..char_index];
@@ -1090,7 +1187,8 @@ pub fn RenderEngineType(
 
                                 try self.indentation_queue.write(writer);
                                 index = char_index;
-                            } else if (char == '\n') {
+                            }
+                            if (self.is_template_text and char == '\n') {
                                 self.indentation_queue.has_pending = true;
                                 continue;
                             }
@@ -1102,6 +1200,7 @@ pub fn RenderEngineType(
                                 '>' => "&gt;",
                                 '&' => "&amp;",
                                 '"' => "&quot;",
+                                '\'' => "&#39;",
                                 else => continue,
                             };
 
@@ -1265,6 +1364,10 @@ pub fn RenderEngineType(
         }
 
         pub fn render(template: Template, data: anytype, writer: *Writer, partials_map: PartialsMap) !void {
+            return renderWithBudget(template, data, writer, partials_map, null);
+        }
+
+        pub fn renderWithBudget(template: Template, data: anytype, writer: *Writer, partials_map: PartialsMap, budget: ?*control.Budget) !void {
             comptime assert(options == .template);
 
             const Data = @TypeOf(data);
@@ -1278,6 +1381,7 @@ pub fn RenderEngineType(
 
             var data_render = DataRender{
                 .out_writer = writer,
+                .budget = budget,
                 .partials_map = partials_map,
                 .stack = &context_stack,
                 .indentation_queue = &indentation_queue,
@@ -3489,7 +3593,7 @@ const tests = struct {
                     \\ \
                     \\  |
                     \\  <
-                    \\  ->
+                    \\->
                     \\  |
                     \\ /
                     \\
@@ -4519,6 +4623,7 @@ const tests = struct {
 
             var data_render = RenderEngine.DataRender{
                 .out_writer = &aw.writer,
+                .is_template_text = true,
                 .stack = undefined,
                 .partials_map = undefined,
                 .indentation_queue = indentation_queue,
@@ -4685,3 +4790,285 @@ const tests = struct {
         return try dir.realPathFileAlloc(io, file_name, testing.allocator);
     }
 };
+
+fn boundedTestTemplate(source: []const u8) !Template {
+    return switch (try mustache.parseText(testing.allocator, source, .{}, .{
+        .copy_strings = false,
+        .features = .{ .lambdas = .disabled },
+    })) {
+        .success => |template| template,
+        .parse_error => error.TestUnexpectedResult,
+    };
+}
+
+test "bounded render exact output capacity and sink failure" {
+    const template = try boundedTestTemplate("{{name}}");
+    defer template.deinit(testing.allocator);
+    var bytes: [5]u8 = undefined;
+    var writer = Writer.fixed(&bytes);
+    try renderBounded(template, .{ .name = "&" }, &writer, .{});
+    try testing.expectEqualStrings("&amp;", writer.buffered());
+    writer = Writer.fixed(bytes[0..4]);
+    try testing.expectError(error.WriteFailed, renderBounded(template, .{ .name = "&" }, &writer, .{}));
+    writer = Writer.fixed(&bytes);
+    try renderBounded(template, .{ .name = "next" }, &writer, .{});
+    try testing.expectEqualStrings("next", writer.buffered());
+}
+
+test "bounded render meters empty list bodies" {
+    const template = try boundedTestTemplate("{{#items}}{{! no output }}{{/items}}");
+    defer template.deinit(testing.allocator);
+    const items = [_]bool{false} ** 1024;
+    var writer = Writer.fixed(&.{});
+    try testing.expectError(error.WorkLimitExceeded, renderBounded(template, .{ .items = &items }, &writer, .{ .max_work = 64 }));
+    try testing.expectEqual(@as(usize, 0), writer.end);
+}
+
+test "bounded render shares depth and work across partial cycles" {
+    const template = try boundedTestTemplate("{{> loop}}");
+    defer template.deinit(testing.allocator);
+    const partials = .{ "loop", template };
+    var writer = Writer.fixed(&.{});
+    try testing.expectError(error.DepthLimitExceeded, renderPartialsBounded(template, partials, .{}, &writer, .{ .max_depth = 4 }));
+    try testing.expectError(error.WorkLimitExceeded, renderPartialsBounded(template, partials, .{}, &writer, .{ .max_depth = 128, .max_work = 24 }));
+    try testing.expectEqual(@as(usize, 0), writer.end);
+}
+
+test "bounded render meters dynamic map misses" {
+    const template = try boundedTestTemplate("{{missing}}");
+    defer template.deinit(testing.allocator);
+    const fields = [_]mustache.Value.Field{.{ .name = "other", .value = .{ .string = "x" } }} ** 128;
+    const value = mustache.Value{ .map = &fields };
+    var writer = Writer.fixed(&.{});
+    try testing.expectError(error.WorkLimitExceeded, renderBounded(template, &value, &writer, .{ .max_work = 64 }));
+}
+
+test "bounded render meters input and output bytes" {
+    const template = try boundedTestTemplate("prefix{{name}}");
+    defer template.deinit(testing.allocator);
+    var bytes: [1024]u8 = undefined;
+    var writer = Writer.fixed(&bytes);
+    try testing.expectError(error.WorkLimitExceeded, renderBounded(template, .{ .name = "a" ** 512 }, &writer, .{ .max_work = 128 }));
+    try testing.expectEqualStrings("prefix", writer.buffered());
+}
+
+test "bounded render rejects unsupported features without invoking lambdas" {
+    const enabled = switch (try mustache.parseText(testing.allocator, "plain", .{}, .{ .copy_strings = false })) {
+        .success => |template| template,
+        .parse_error => return error.TestUnexpectedResult,
+    };
+    defer enabled.deinit(testing.allocator);
+    var bytes: [64]u8 = undefined;
+    var writer = Writer.fixed(&bytes);
+    try testing.expectError(error.UnsupportedFeature, renderBounded(enabled, .{}, &writer, .{}));
+    const parent = try boundedTestTemplate("{{> partial}}");
+    defer parent.deinit(testing.allocator);
+    try testing.expectError(error.UnsupportedFeature, renderPartialsBounded(parent, .{ "partial", enabled }, .{}, &writer, .{}));
+    const lambda_template = try boundedTestTemplate("{{danger}}");
+    defer lambda_template.deinit(testing.allocator);
+    const Data = struct {
+        pub fn danger(_: mustache.LambdaContext) !void {
+            return error.TestUnexpectedResult;
+        }
+    };
+    try testing.expectError(error.UnsupportedFeature, renderBounded(lambda_template, Data{}, &writer, .{}));
+    const inheritance = try boundedTestTemplate("{{<parent}}{{$body}}text{{/body}}{{/parent}}");
+    defer inheritance.deinit(testing.allocator);
+    try testing.expectError(error.UnsupportedFeature, renderBounded(inheritance, .{}, &writer, .{}));
+    const dynamic_partial = try boundedTestTemplate("{{>*name}}");
+    defer dynamic_partial.deinit(testing.allocator);
+    try testing.expectError(error.UnsupportedFeature, renderBounded(dynamic_partial, .{}, &writer, .{}));
+    try testing.expectEqual(@as(usize, 0), writer.end);
+}
+
+test "bounded render rejects excessive configured and dotted lookup depth" {
+    const template = try boundedTestTemplate("text");
+    defer template.deinit(testing.allocator);
+    var bytes: [8]u8 = undefined;
+    var writer = Writer.fixed(&bytes);
+    try testing.expectError(error.DepthLimitExceeded, renderBounded(template, .{}, &writer, .{ .max_depth = 129 }));
+    const path = [_][]const u8{"a"} ** 129;
+    const elements = [_]Element{.{ .interpolation = &path }};
+    const deep = Template{ .elements = &elements, .options = template.options };
+    try testing.expectError(error.DepthLimitExceeded, renderBounded(deep, .{}, &writer, .{}));
+    try testing.expectEqual(@as(usize, 0), writer.end);
+}
+
+test "bounded parser rejects excessive nesting with an ordinary error" {
+    const parsed = try mustache.parseText(testing.allocator, "{{#x}}" ** 128 ++ "{{/x}}" ** 128, .{}, .{
+        .copy_strings = false,
+        .features = .{ .lambdas = .disabled },
+    });
+    switch (parsed) {
+        .success => |template| {
+            template.deinit(testing.allocator);
+            return error.TestUnexpectedResult;
+        },
+        .parse_error => |detail| try testing.expectEqual(error.DepthLimitExceeded, detail.parse_error),
+    }
+}
+
+test "bounded numeric formatting exhaustion returns an error" {
+    const template = try boundedTestTemplate("{{value}}");
+    defer template.deinit(testing.allocator);
+    var bytes: [1024]u8 = undefined;
+    var writer = Writer.fixed(&bytes);
+    try testing.expectError(error.WriteFailed, renderBounded(template, .{ .value = @as(f64, 1e200) }, &writer, .{}));
+}
+
+test "bounded interpolation escapes apostrophes and preserves explicit raw values" {
+    const template = try boundedTestTemplate("{{value}}|{{{value}}}|{{&value}}");
+    defer template.deinit(testing.allocator);
+    var bytes: [128]u8 = undefined;
+    var writer = Writer.fixed(&bytes);
+    try renderBounded(template, .{ .value = "'\"<&>" }, &writer, .{});
+    try testing.expectEqualStrings("&#39;&quot;&lt;&amp;&gt;|'\"<&>|'\"<&>", writer.buffered());
+}
+
+test "bounded partial indentation follows template lines rather than interpolated newlines" {
+    const template = try boundedTestTemplate("\\\n {{>partial}}\n/\n");
+    defer template.deinit(testing.allocator);
+    const partial = try boundedTestTemplate("|\n{{{content}}}\n|\n");
+    defer partial.deinit(testing.allocator);
+    try testing.expectEqualStrings(" ", template.elements[1].partial.indentation orelse "");
+    var bytes: [128]u8 = undefined;
+    var writer = Writer.fixed(&bytes);
+    try renderPartialsBounded(template, .{ "partial", partial }, .{ .content = "<\n->" }, &writer, .{});
+    try testing.expectEqualStrings("\\\n |\n <\n->\n |\n/\n", writer.buffered());
+}
+
+test "bounded parser rejects excessive dotted paths before recursive splitting" {
+    const parsed = try mustache.parseText(testing.allocator, "{{" ++ "a." ** 128 ++ "a}}", .{}, .{
+        .copy_strings = false,
+        .features = .{ .lambdas = .disabled },
+    });
+    switch (parsed) {
+        .success => |template| {
+            template.deinit(testing.allocator);
+            return error.TestUnexpectedResult;
+        },
+        .parse_error => |detail| try testing.expectEqual(error.DepthLimitExceeded, detail.parse_error),
+    }
+}
+
+test "bounded parser handles long adjacent standalone tags without recursive trimming" {
+    const template = try boundedTestTemplate("{{>missing}}" ** 1024 ++ "\n");
+    defer template.deinit(testing.allocator);
+    var writer = Writer.fixed(&.{});
+    try renderBounded(template, .{}, &writer, .{});
+    try testing.expectEqual(@as(usize, 0), writer.end);
+}
+
+test "bounded partials reject application callbacks before invocation" {
+    const template = try boundedTestTemplate("{{>partial}}");
+    defer template.deinit(testing.allocator);
+    const CustomMap = struct {
+        pub const KV = std.StringHashMap(Template).KV;
+        calls: *usize,
+        pub fn capacity(self: @This()) usize {
+            self.calls.* += 1;
+            return 1;
+        }
+        pub fn get(self: @This(), _: []const u8) ?Template {
+            self.calls.* += 1;
+            const allocation = testing.allocator.alloc(u8, 1) catch unreachable;
+            defer testing.allocator.free(allocation);
+            return null;
+        }
+    };
+    var calls: usize = 0;
+    const partials = CustomMap{ .calls = &calls };
+    var writer = Writer.fixed(&.{});
+    try testing.expectError(error.UnsupportedFeature, renderPartialsBounded(template, partials, .{}, &writer, .{}));
+    try testing.expectEqual(@as(usize, 0), calls);
+    // The existing extensible API still permits the application's callback.
+    try renderPartials(template, partials, .{}, &writer);
+    try testing.expectEqual(@as(usize, 1), calls);
+}
+
+test "bounded partial map work includes full key comparisons" {
+    const key = "x" ** 63 ++ "z";
+    const template = try boundedTestTemplate("{{>" ++ key ++ "}}");
+    defer template.deinit(testing.allocator);
+    var partials = std.StringHashMap(Template).init(testing.allocator);
+    defer partials.deinit();
+    var names: [16][64]u8 = undefined;
+    for (&names, 0..) |*name, index| {
+        @memset(name, 'x');
+        name[63] = @as(u8, @intCast(index)) + 'A';
+        try partials.put(name, template);
+    }
+    var writer = Writer.fixed(&.{});
+    try testing.expectError(error.WorkLimitExceeded, renderPartialsBounded(template, partials, .{}, &writer, .{ .max_work = 512 }));
+    try renderPartialsBounded(template, partials, .{}, &writer, .{});
+}
+
+test "bounded parser rejects empty delimiter declarations without arithmetic traps" {
+    for ([_][]const u8{ "{{=}}", "{{=}}x" }) |source| {
+        const parsed = try mustache.parseText(testing.allocator, source, .{}, .{
+            .copy_strings = false,
+            .features = .{ .lambdas = .disabled },
+        });
+        switch (parsed) {
+            .success => |template| {
+                template.deinit(testing.allocator);
+                return error.TestUnexpectedResult;
+            },
+            .parse_error => |detail| try testing.expectEqual(error.InvalidDelimiters, detail.parse_error),
+        }
+    }
+}
+
+test "bounded delimiter declarations distinguish separators from delimiter bytes" {
+    for (std.ascii.whitespace) |space| {
+        var storage: [64]u8 = undefined;
+        var source = Writer.fixed(&storage);
+        try source.writeAll("{{=A");
+        try source.writeByte(space);
+        try source.writeAll("X Y=}}A");
+        try source.writeByte(space);
+        try source.writeAll("XnameY");
+        const malformed = try mustache.parseText(testing.allocator, source.buffered(), .{}, .{
+            .copy_strings = false,
+            .features = .{ .lambdas = .disabled },
+        });
+        switch (malformed) {
+            .success => |template| {
+                template.deinit(testing.allocator);
+                return error.TestUnexpectedResult;
+            },
+            .parse_error => |detail| try testing.expectEqual(error.InvalidDelimiters, detail.parse_error),
+        }
+
+        // Two delimiters can be separated by any ASCII whitespace.
+        source = Writer.fixed(&storage);
+        try source.writeAll("{{=A");
+        try source.writeByte(space);
+        try source.writeAll("Y=}}AnameY");
+        const template = try boundedTestTemplate(source.buffered());
+        defer template.deinit(testing.allocator);
+        var output: [8]u8 = undefined;
+        var writer = Writer.fixed(&output);
+        try renderBounded(template, .{ .name = "ok" }, &writer, .{});
+        try testing.expectEqualStrings("ok", writer.buffered());
+
+        // Direct caller-supplied delimiters have the same validation.
+        const bad = [_]u8{ 'A', space, 'X' };
+        for ([_]Delimiters{
+            .{ .starting_delimiter = &bad, .ending_delimiter = "Y" },
+            .{ .starting_delimiter = "A", .ending_delimiter = &bad },
+        }) |delimiters| {
+            const direct = try mustache.parseText(testing.allocator, "ignored", delimiters, .{
+                .copy_strings = false,
+                .features = .{ .lambdas = .disabled },
+            });
+            switch (direct) {
+                .success => |valid| {
+                    valid.deinit(testing.allocator);
+                    return error.TestUnexpectedResult;
+                },
+                .parse_error => |detail| try testing.expectEqual(error.InvalidDelimiters, detail.parse_error),
+            }
+        }
+    }
+}

@@ -1,0 +1,33 @@
+{
+  "repository": "https://github.com/mustache/spec",
+  "revision": "e8ec001db7f594521e773c34866aca2b5d6b0037",
+  "files": {
+    "comments.json": {
+      "sha256": "e5e07151b538c62d3d00e585ff49e411817ba7eb834267fd5ad67225b6e025b6",
+      "cases": 12
+    },
+    "delimiters.json": {
+      "sha256": "a5ac3b70e04ecd03f292977e172883a41c97a949201e7d6aa364054148df225e",
+      "cases": 14
+    },
+    "interpolation.json": {
+      "sha256": "530f691371198333f894a4b7c64cf7bdfd2247dfa04e769202c4c3fc31c28bf1",
+      "cases": 42
+    },
+    "inverted.json": {
+      "sha256": "8c5f81135bfad218ca9a4524221c3199e3b0e82654f9b4686013ca6ef93edaa5",
+      "cases": 22
+    },
+    "partials.json": {
+      "sha256": "61b0de5f51b8cb61259a7291aeaa2df26ef8e6b410be1d5ebd39e6e318a1f640",
+      "cases": 12
+    },
+    "sections.json": {
+      "sha256": "f03d109633861186e788d8c63b63a4717635c3049f0d4378aa249dd303c7da82",
+      "cases": 34
+    },
+    "LICENSE": {
+      "sha256": "c88803846063bced3d18099a88a5896c2e4279e65a879655367d58f6836e7617"
+    }
+  }
+}

@@ -93,7 +93,7 @@ pub fn hasFields(comptime T: type, comptime names: anytype) bool {
 pub inline fn canDeref(comptime TValue: type) bool {
     return isSingleItemPtr(TValue) and
         switch (@typeInfo(std.meta.Child(TValue))) {
-        .@"fn", .@"opaque" => false,
-        else => true,
-    };
+            .@"fn", .@"opaque" => false,
+            else => true,
+        };
 }

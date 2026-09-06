@@ -48,11 +48,7 @@ pub const ErasedType = struct {
 
         var value: ErasedType = .{};
         if (comptime data_size > 0) {
-            // No need for cast checks here
-            // We can assure that this pointer will always be the correct type,
-            // since the context holds the type into the concrete implementation.
-            @setRuntimeSafety(false);
-
+            // The vtable retains the concrete type. Keep alignment checks enabled.
             const ptr: *Data = @ptrCast(@alignCast(&value.content));
             ptr.* = data;
         }
@@ -66,11 +62,7 @@ pub const ErasedType = struct {
         if (comptime data_size == 0) {
             return undefined;
         } else {
-            // No need for cast checks here
-            // We can assure that this pointer will always be the correct type,
-            // since the context holds the type into the concrete implementation
-            @setRuntimeSafety(false);
-
+            // The vtable retains the concrete type. Keep alignment checks enabled.
             const ptr = @as(*const Data, @ptrCast(@alignCast(&self.content)));
             return ptr.*;
         }
@@ -78,6 +70,7 @@ pub const ErasedType = struct {
 };
 
 const Writer = std.Io.Writer;
+const control = @import("../../budget.zig");
 
 /// Native context can resolve paths for zig structs and values
 /// This struct implements the expected context interface using dynamic dispatch.
@@ -102,6 +95,7 @@ pub fn ContextInterfaceType(
                 *const ErasedType,
                 Element.Path,
                 ?usize,
+                ?*control.Budget,
             ) PathResolutionType(ContextInterface),
             capacityHint: *const fn (
                 *const ErasedType,
@@ -134,7 +128,11 @@ pub fn ContextInterfaceType(
             path: Element.Path,
             index: ?usize,
         ) PathResolutionType(ContextInterface) {
-            return self.vtable.get(&self.ctx, path, index);
+            return self.getBounded(path, index, null);
+        }
+
+        pub inline fn getBounded(self: ContextInterface, path: Element.Path, index: ?usize, budget: ?*control.Budget) PathResolutionType(ContextInterface) {
+            return self.vtable.get(&self.ctx, path, index, budget);
         }
 
         pub inline fn capacityHint(
@@ -149,11 +147,15 @@ pub fn ContextInterfaceType(
             self: *const ContextInterface,
             path: Element.Path,
         ) PathResolutionType(ContextIterator) {
-            const result = self.vtable.get(&self.ctx, path, 0);
+            return self.iteratorBounded(path, null);
+        }
+
+        pub fn iteratorBounded(self: *const ContextInterface, path: Element.Path, budget: ?*control.Budget) PathResolutionType(ContextIterator) {
+            const result = self.vtable.get(&self.ctx, path, 0, budget);
 
             return switch (result) {
                 .field => |item| .{
-                    .field = ContextIterator.initSequence(self, path, item),
+                    .field = ContextIterator.initSequenceBounded(self, path, item, budget),
                 },
                 .iterator_consumed => .{
                     .field = ContextIterator.initEmpty(),
@@ -230,11 +232,13 @@ pub fn ContextImplType(
             ctx: *const ErasedType,
             path: Element.Path,
             index: ?usize,
+            budget: ?*control.Budget,
         ) PathResolutionType(Context) {
-            return Invoker.get(
+            return Invoker.getBounded(
                 ctx.get(Data),
                 path,
                 index,
+                budget,
             );
         }
 

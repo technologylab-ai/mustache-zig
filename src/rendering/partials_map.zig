@@ -9,6 +9,7 @@ const stdx = @import("../stdx.zig");
 
 const mustache = @import("../mustache.zig");
 const RenderOptions = mustache.options.RenderOptions;
+const control = @import("budget.zig");
 
 /// Partials map from a comptime known type
 /// It works like a HashMap, but can be initialized from a tuple, slice or Hashmap
@@ -43,13 +44,37 @@ pub fn PartialsMapType(comptime TPartials: type, comptime comptime_options: Rend
         }
 
         pub fn get(self: PartialsMap, key: []const u8) ?PartialsMap.Template {
+            return self.getWithBudget(key, null);
+        }
+
+        pub fn getWithBudget(self: PartialsMap, key: []const u8, budget: ?*control.Budget) ?PartialsMap.Template {
             comptime validatePartials();
+            if (!control.spend(budget, 1)) return null;
 
             if (comptime isValidTuple()) {
-                return self.getFromTuple(key);
+                return self.getFromTuple(key, budget);
             } else if (comptime isValidIndexable()) {
-                return self.getFromIndexable(key);
+                return self.getFromIndexable(key, budget);
             } else if (comptime isValidMap()) {
+                if (budget) |b| {
+                    // Only standard string maps enter the bounded path.
+                    // Custom lookup or capacity callbacks can execute application code.
+                    if (comptime TPartials == std.StringHashMap(PartialsMap.Template) or
+                        TPartials == std.StringHashMapUnmanaged(PartialsMap.Template))
+                    {
+                        // Meter empty slots and every possible key comparison.
+                        if (!b.spend(self.partials.capacity())) return null;
+                        var iterator = self.partials.iterator();
+                        while (iterator.next()) |entry| {
+                            if (!b.spend(1) or !b.spend(@min(entry.key_ptr.len, key.len))) return null;
+                            if (std.mem.eql(u8, entry.key_ptr.*, key)) return entry.value_ptr.*;
+                        }
+                        return null;
+                    } else {
+                        _ = b.fail(error.UnsupportedFeature);
+                        return null;
+                    }
+                }
                 return self.getFromMap(key);
             } else if (comptime isEmpty()) {
                 return null;
@@ -58,14 +83,16 @@ pub fn PartialsMapType(comptime TPartials: type, comptime comptime_options: Rend
             }
         }
 
-        fn getFromTuple(self: PartialsMap, key: []const u8) ?PartialsMap.Template {
+        fn getFromTuple(self: PartialsMap, key: []const u8, budget: ?*control.Budget) ?PartialsMap.Template {
             comptime assert(isValidTuple());
 
             if (comptime isPartialsTupleElement(TPartials)) {
+                if (!control.spend(budget, @min(self.partials.@"0".len, key.len))) return null;
                 return if (std.mem.eql(u8, self.partials.@"0", key)) self.partials.@"1" else null;
             } else {
                 inline for (0..meta.fields(TPartials).len) |index| {
                     const item = self.partials[index];
+                    if (!control.spend(budget, 1) or !control.spend(budget, @min(item.@"0".len, key.len))) return null;
                     if (std.mem.eql(u8, item.@"0", key)) return item.@"1";
                 } else {
                     return null;
@@ -73,10 +100,11 @@ pub fn PartialsMapType(comptime TPartials: type, comptime comptime_options: Rend
             }
         }
 
-        fn getFromIndexable(self: PartialsMap, key: []const u8) ?PartialsMap.Template {
+        fn getFromIndexable(self: PartialsMap, key: []const u8, budget: ?*control.Budget) ?PartialsMap.Template {
             comptime assert(isValidIndexable());
 
             for (self.partials) |item| {
+                if (!control.spend(budget, 1) or !control.spend(budget, @min(item[0].len, key.len))) return null;
                 if (std.mem.eql(u8, item[0], key)) return item[1];
             }
 
@@ -160,7 +188,7 @@ pub fn PartialsMapType(comptime TPartials: type, comptime comptime_options: Rend
                         const kv: KV = undefined;
                         return stdx.isZigString(@TypeOf(kv.key)) and
                             (@TypeOf(kv.value) == PartialsMap.Template or
-                            (stdx.isZigString(@TypeOf(kv.value)) and stdx.isZigString(PartialsMap.Template)));
+                                (stdx.isZigString(@TypeOf(kv.value)) and stdx.isZigString(PartialsMap.Template)));
                     }
                 }
 

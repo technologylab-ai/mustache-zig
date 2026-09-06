@@ -205,10 +205,10 @@ pub fn byValue(comptime TField: type) bool {
 
         const can_embed = size <= max_size and
             switch (@typeInfo(TField)) {
-            .@"enum", .enum_literal, .bool, .int, .float => true,
-            .optional => |info| byValue(info.child),
-            else => false,
-        };
+                .@"enum", .enum_literal, .bool, .int, .float => true,
+                .optional => |info| byValue(info.child),
+                else => false,
+            };
 
         return is_zero_size or is_pointer or is_lambda_invoker or can_embed;
     }
