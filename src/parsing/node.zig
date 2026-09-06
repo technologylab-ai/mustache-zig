@@ -126,46 +126,42 @@ pub fn NodeType(comptime options: TemplateOptions) type {
         fn trimPreviousNodesRight(nodes: *List, index: u32) bool {
             if (comptime !has_trimming) return false;
 
-            if (index > 0) {
-                var current_node = &nodes.items[index];
-                const prev_index = index - 1;
-                var node = &nodes.items[prev_index];
-                var text_part = &node.text_part;
-
+            // Find the first decisive predecessor without growing the stack.
+            var cursor: usize = index;
+            var can_trim = true;
+            while (cursor > 0) {
+                cursor -= 1;
+                const text_part = &nodes.items[cursor].text_part;
                 if (text_part.part_type == .static_text) {
                     switch (text_part.trimming.right) {
-                        .allow_trimming => |trimming| {
-                            // Non standalone tags must check the previous node
-                            const can_trim = trimming.stand_alone or trimPreviousNodesRight(
-                                nodes,
-                                prev_index,
-                            );
-
-                            if (can_trim) {
-                                if (text_part.trimRight()) |indentation| {
-                                    current_node.text_part.indentation = indentation;
-                                }
-
-                                return true;
-                            } else {
-                                text_part.trimming.right = .preserve_whitespaces;
-                                return false;
-                            }
+                        .allow_trimming => |trimming| if (trimming.stand_alone) {
+                            break;
                         },
-                        .trimmed => return true,
-                        .preserve_whitespaces => return false,
+                        .trimmed => break,
+                        .preserve_whitespaces => {
+                            can_trim = false;
+                            break;
+                        },
                     }
-                } else if (text_part.is_stand_alone) {
-                    // Depends on the previous node
-                    return trimPreviousNodesRight(nodes, prev_index);
-                } else {
-                    // Interpolation tags must preserve whitespaces
-                    return false;
+                } else if (!text_part.is_stand_alone) {
+                    can_trim = false;
+                    break;
                 }
-            } else {
-                // No parent node, the first node can always be considered stand-alone
-                return true;
             }
+
+            // Apply the same decisions in predecessor-to-successor order.
+            while (cursor < index) : (cursor += 1) {
+                const text_part = &nodes.items[cursor].text_part;
+                if (text_part.part_type != .static_text or text_part.trimming.right != .allow_trimming) continue;
+                if (can_trim) {
+                    if (text_part.trimRight()) |indentation| {
+                        nodes.items[cursor + 1].text_part.indentation = indentation;
+                    }
+                } else {
+                    text_part.trimming.right = .preserve_whitespaces;
+                }
+            }
+            return can_trim;
         }
     };
 }

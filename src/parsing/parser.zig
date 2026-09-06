@@ -134,6 +134,9 @@ pub fn ParserType(comptime options: TemplateOptions) type {
             delimiters: Delimiters,
             render: anytype,
         ) (AbortError || LoadError || RenderError(@TypeOf(render)))!void {
+            if (level >= @import("../rendering/budget.zig").hard_max_depth) {
+                return self.abort(error.DepthLimitExceeded, null);
+            }
             var current_delimiters = delimiters;
 
             var nodes = &self.inner_state.nodes;
@@ -425,7 +428,15 @@ pub fn ParserType(comptime options: TemplateOptions) type {
             }
         }
 
-        pub fn parsePath(self: *Parser, identifier: []const u8) Allocator.Error!Element.Path {
+        pub fn parsePath(self: *Parser, identifier: []const u8) (AbortError || Allocator.Error)!Element.Path {
+            var check = std.mem.tokenizeScalar(u8, identifier, '.');
+            var count: usize = 0;
+            while (check.next() != null) {
+                if (count >= @import("../rendering/budget.zig").hard_max_depth) {
+                    return self.abort(error.DepthLimitExceeded, null);
+                }
+                count += 1;
+            }
             const action = struct {
                 pub fn action(
                     ctx: *Parser,

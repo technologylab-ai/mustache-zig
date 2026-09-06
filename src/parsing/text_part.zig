@@ -71,7 +71,7 @@ pub fn TextPartType(comptime options: TemplateOptions) type {
 
                     self.trimming.right = .trimmed;
 
-                    if (right_trimming.index + 1 >= content.len) {
+                    if (right_trimming.index >= content.len) {
                         break :indentation null;
                     } else {
                         break :indentation RefCountedSlice{
@@ -130,11 +130,12 @@ pub fn TextPartType(comptime options: TemplateOptions) type {
             // Delimiters are the only case of match closing tags {{= and =}}
             // Validate if the content ends with the proper "=" symbol before parsing the delimiters
             var content = self.content.slice;
+            if (content.len == 0) return null;
             const last_index = content.len - 1;
             if (content[last_index] != @intFromEnum(PartType.delimiters)) return null;
 
             content = content[0..last_index];
-            var iterator = std.mem.tokenizeAny(u8, content, " \t");
+            var iterator = std.mem.tokenizeAny(u8, content, &std.ascii.whitespace);
 
             const starting_delimiter = iterator.next() orelse return null;
             const ending_delimiter = iterator.next() orelse return null;

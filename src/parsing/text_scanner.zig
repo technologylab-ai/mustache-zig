@@ -156,7 +156,11 @@ pub fn TextScannerType(comptime Node: type, comptime options: TemplateOptions) t
             if (delimiters.starting_delimiter.len == 0) return ParseError.InvalidDelimiters;
             if (delimiters.ending_delimiter.len == 0) return ParseError.InvalidDelimiters;
 
-            self.delimiter_max_size = @as(u32, @intCast(@max(delimiters.starting_delimiter.len, delimiters.ending_delimiter.len))) + 1;
+            const max_size = @max(delimiters.starting_delimiter.len, delimiters.ending_delimiter.len);
+            if (max_size >= std.math.maxInt(u32)) return ParseError.InvalidDelimiters;
+            for (delimiters.starting_delimiter) |byte| if (std.ascii.isWhitespace(byte)) return ParseError.InvalidDelimiters;
+            for (delimiters.ending_delimiter) |byte| if (std.ascii.isWhitespace(byte)) return ParseError.InvalidDelimiters;
+            self.delimiter_max_size = @as(u32, @intCast(max_size)) + 1;
             self.delimiters = delimiters;
         }
 

@@ -56,6 +56,10 @@ pub const parseText = template.parseText;
 pub const parseFile = template.parseFile;
 pub const parseComptime = template.parseComptime;
 
+pub const RenderLimits = rendering.RenderLimits;
+pub const BoundedRenderError = rendering.BoundedRenderError;
+pub const renderBounded = rendering.renderBounded;
+pub const renderPartialsBounded = rendering.renderPartialsBounded;
 pub const render = rendering.render;
 pub const renderWithOptions = rendering.renderWithOptions;
 pub const renderPartials = rendering.renderPartials;

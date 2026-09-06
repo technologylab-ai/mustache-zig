@@ -100,12 +100,12 @@ pub fn isLambdaInvoker(comptime TValue: type) bool {
             @hasField(TValue, "data") and
             @hasField(TValue, "bound_fn") and
             blk: {
-            const TFn = meta.Child(meta.fieldInfo(TValue, .bound_fn).type);
-            const TData = meta.fieldInfo(TValue, .data).type;
+                const TFn = meta.Child(meta.fieldInfo(TValue, .bound_fn).type);
+                const TData = meta.fieldInfo(TValue, .data).type;
 
-            break :blk comptime isValidLambdaFunction(TData, TFn) and
-                TValue == LambdaInvokerType(TData, TFn);
-        };
+                break :blk comptime isValidLambdaFunction(TData, TFn) and
+                    TValue == LambdaInvokerType(TData, TFn);
+            };
     }
 }
 
@@ -164,9 +164,9 @@ pub fn isValidLambdaFunction(comptime TData: type, comptime TFn: type) bool {
             &.{ TValue, *const TValue, *TValue },
         ) and
             paramIs(
-            fn_info.params[1],
-            &.{LambdaContext},
-        ),
+                fn_info.params[1],
+                &.{LambdaContext},
+            ),
         else => false,
     };
 
