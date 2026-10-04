@@ -100,8 +100,8 @@ pub fn isLambdaInvoker(comptime TValue: type) bool {
             @hasField(TValue, "data") and
             @hasField(TValue, "bound_fn") and
             blk: {
-                const TFn = meta.Child(meta.fieldInfo(TValue, .bound_fn).type);
-                const TData = meta.fieldInfo(TValue, .data).type;
+                const TFn = meta.Child(@FieldType(TValue, "bound_fn"));
+                const TData = @FieldType(TValue, "data");
 
                 break :blk comptime isValidLambdaFunction(TData, TFn) and
                     TValue == LambdaInvokerType(TData, TFn);
@@ -137,13 +137,10 @@ pub fn isValidLambdaFunction(comptime TData: type, comptime TFn: type) bool {
         else => return false,
     };
 
-    const Type = std.builtin.Type;
-    const FnParam = Type.Fn.Param;
-
     const paramIs = struct {
-        fn action(comptime param: FnParam, comptime types: []const type) bool {
+        fn action(comptime param: ?type, comptime types: []const type) bool {
             inline for (types) |compare_to| {
-                if (param.type) |param_type| {
+                if (param) |param_type| {
                     if (param_type == compare_to) return true;
                 }
             } else {
@@ -154,17 +151,17 @@ pub fn isValidLambdaFunction(comptime TData: type, comptime TFn: type) bool {
 
     const TValue = if (comptime stdx.isSingleItemPtr(TData)) meta.Child(TData) else TData;
 
-    const valid_params = comptime switch (fn_info.params.len) {
+    const valid_params = comptime switch (fn_info.param_types.len) {
         1 => paramIs(
-            fn_info.params[0],
+            fn_info.param_types[0],
             &.{LambdaContext},
         ),
         2 => paramIs(
-            fn_info.params[0],
+            fn_info.param_types[0],
             &.{ TValue, *const TValue, *TValue },
         ) and
             paramIs(
-                fn_info.params[1],
+                fn_info.param_types[1],
                 &.{LambdaContext},
             ),
         else => false,
@@ -267,7 +264,7 @@ pub fn LambdaInvokerType(comptime TData: type, comptime TFn: type) type {
                 // fn(self TValue ...)
                 // fn(self *const TValue ...)
                 // fn(self *TValue ...)
-                const fnArg = fn_type.params[0].type orelse
+                const fnArg = fn_type.param_types[0] orelse
                     @compileError("Generic argument could not be evaluated");
 
                 switch (@typeInfo(TData)) {
@@ -283,7 +280,7 @@ pub fn LambdaInvokerType(comptime TData: type, comptime TFn: type) type {
                                     switch (@typeInfo(fnArg)) {
                                         .pointer => |arg_info| {
                                             if (info.child == arg_info.child) {
-                                                if (arg_info.is_const == true or info.is_const == false) {
+                                                if (arg_info.attrs.@"const" == true or info.attrs.@"const" == false) {
 
                                                     // Both context and parameter are pointers
                                                     // fn (self *TValue ...) called from a *TValue
@@ -303,7 +300,7 @@ pub fn LambdaInvokerType(comptime TData: type, comptime TFn: type) type {
                     else => {
                         switch (@typeInfo(fnArg)) {
                             .pointer => |arg_info| {
-                                if (TData == arg_info.child and arg_info.is_const == true) {
+                                if (TData == arg_info.child and arg_info.attrs.@"const" == true) {
 
                                     // fn (self const* TValue ...)
                                     try self.call(.{ &self.data, lambda_context });

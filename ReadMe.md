@@ -1,4 +1,4 @@
-# Mustache for Zig 0.16.0
+# Mustache for Zig 0.17.0
 
 A pure Zig, MIT-licensed Mustache library with cached templates and standard
 `std.Io.Writer` output. This fork adds **bounded cached rendering** for
@@ -12,7 +12,7 @@ and source attribution remain intact.
 
 ## Parse once, render into your writer
 
-Import the `mustache` module from this package. Use **exact Zig 0.16.0**.
+Import the `mustache` module from this package. Use **exact Zig 0.17.0**.
 
 ```zig
 const std = @import("std");
@@ -80,9 +80,9 @@ Zig cached path and adds aggregate template storage/source/element limits.
 ## Verification
 
 ```sh
-zig build verify -Doptimize=Debug -j2
-zig build verify -Doptimize=ReleaseSafe -j2
-zig build check -Dtarget=x86_64-windows -Doptimize=ReleaseSafe -j2
+zig build verify -Doptimize=debug -j2
+zig build verify -Doptimize=safe -j2
+zig build check -Dtarget=x86_64-windows -Doptimize=safe -j2
 ```
 
 `verify` runs the inherited runtime/unit suite, focused budget/parser regressions,
@@ -93,4 +93,4 @@ separately; optional Mustache specification modules are explicitly excluded.
 Fixture revisions, hashes, counts and MIT licenses are in [tests/spec](tests/spec/README.md).
 
 CI verifies Debug and ReleaseSafe natively on Linux, macOS and Windows using
-checksum-verified Zig 0.16.0. Cross-compilation is compilation evidence only.
+checksum-verified Zig 0.17.0. Cross-compilation is compilation evidence only.

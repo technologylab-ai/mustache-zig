@@ -4678,9 +4678,9 @@ const tests = struct {
         } else {
             const info = @typeInfo(Data);
             if (info == .@"struct") {
-                const decls = info.@"struct".decls;
-                inline for (decls) |decl| {
-                    const DeclType = @TypeOf(@field(Data, decl.name));
+                const decl_names = info.@"struct".decl_names;
+                inline for (decl_names) |decl_name| {
+                    const DeclType = @TypeOf(@field(Data, decl_name));
                     if (@typeInfo(DeclType) == .@"fn") return true;
                 }
             }
@@ -4738,7 +4738,7 @@ const tests = struct {
             // Cached template render
             const comptime_template = comptime mustache.parseComptime(template_text, .{}, .{});
 
-            const PartialTuple = std.meta.Tuple(&[_]type{ []const u8, Template });
+            const PartialTuple = @Tuple(&[_]type{ []const u8, Template });
             comptime var comptime_partials: [partials.len]PartialTuple = undefined;
 
             comptime {
@@ -4801,6 +4801,13 @@ fn boundedTestTemplate(source: []const u8) !Template {
     };
 }
 
+fn repeatedTestBytes(comptime pattern: []const u8, comptime count: usize) [pattern.len * count]u8 {
+    @setEvalBranchQuota(1000 + count * (pattern.len + 1));
+    var bytes: [pattern.len * count]u8 = undefined;
+    for (0..count) |index| @memcpy(bytes[index * pattern.len ..][0..pattern.len], pattern);
+    return bytes;
+}
+
 test "bounded render exact output capacity and sink failure" {
     const template = try boundedTestTemplate("{{name}}");
     defer template.deinit(testing.allocator);
@@ -4818,7 +4825,7 @@ test "bounded render exact output capacity and sink failure" {
 test "bounded render meters empty list bodies" {
     const template = try boundedTestTemplate("{{#items}}{{! no output }}{{/items}}");
     defer template.deinit(testing.allocator);
-    const items = [_]bool{false} ** 1024;
+    const items: [1024]bool = @splat(false);
     var writer = Writer.fixed(&.{});
     try testing.expectError(error.WorkLimitExceeded, renderBounded(template, .{ .items = &items }, &writer, .{ .max_work = 64 }));
     try testing.expectEqual(@as(usize, 0), writer.end);
@@ -4837,7 +4844,7 @@ test "bounded render shares depth and work across partial cycles" {
 test "bounded render meters dynamic map misses" {
     const template = try boundedTestTemplate("{{missing}}");
     defer template.deinit(testing.allocator);
-    const fields = [_]mustache.Value.Field{.{ .name = "other", .value = .{ .string = "x" } }} ** 128;
+    const fields: [128]mustache.Value.Field = @splat(.{ .name = "other", .value = .{ .string = "x" } });
     const value = mustache.Value{ .map = &fields };
     var writer = Writer.fixed(&.{});
     try testing.expectError(error.WorkLimitExceeded, renderBounded(template, &value, &writer, .{ .max_work = 64 }));
@@ -4848,7 +4855,8 @@ test "bounded render meters input and output bytes" {
     defer template.deinit(testing.allocator);
     var bytes: [1024]u8 = undefined;
     var writer = Writer.fixed(&bytes);
-    try testing.expectError(error.WorkLimitExceeded, renderBounded(template, .{ .name = "a" ** 512 }, &writer, .{ .max_work = 128 }));
+    const name: [512]u8 = @splat('a');
+    try testing.expectError(error.WorkLimitExceeded, renderBounded(template, .{ .name = &name }, &writer, .{ .max_work = 128 }));
     try testing.expectEqualStrings("prefix", writer.buffered());
 }
 
@@ -4887,7 +4895,7 @@ test "bounded render rejects excessive configured and dotted lookup depth" {
     var bytes: [8]u8 = undefined;
     var writer = Writer.fixed(&bytes);
     try testing.expectError(error.DepthLimitExceeded, renderBounded(template, .{}, &writer, .{ .max_depth = 129 }));
-    const path = [_][]const u8{"a"} ** 129;
+    const path: [129][]const u8 = @splat("a");
     const elements = [_]Element{.{ .interpolation = &path }};
     const deep = Template{ .elements = &elements, .options = template.options };
     try testing.expectError(error.DepthLimitExceeded, renderBounded(deep, .{}, &writer, .{}));
@@ -4895,7 +4903,8 @@ test "bounded render rejects excessive configured and dotted lookup depth" {
 }
 
 test "bounded parser rejects excessive nesting with an ordinary error" {
-    const parsed = try mustache.parseText(testing.allocator, "{{#x}}" ** 128 ++ "{{/x}}" ** 128, .{}, .{
+    const source = comptime repeatedTestBytes("{{#x}}", 128) ++ repeatedTestBytes("{{/x}}", 128);
+    const parsed = try mustache.parseText(testing.allocator, &source, .{}, .{
         .copy_strings = false,
         .features = .{ .lambdas = .disabled },
     });
@@ -4938,7 +4947,8 @@ test "bounded partial indentation follows template lines rather than interpolate
 }
 
 test "bounded parser rejects excessive dotted paths before recursive splitting" {
-    const parsed = try mustache.parseText(testing.allocator, "{{" ++ "a." ** 128 ++ "a}}", .{}, .{
+    const source = comptime "{{".* ++ repeatedTestBytes("a.", 128) ++ "a}}".*;
+    const parsed = try mustache.parseText(testing.allocator, &source, .{}, .{
         .copy_strings = false,
         .features = .{ .lambdas = .disabled },
     });
@@ -4952,7 +4962,8 @@ test "bounded parser rejects excessive dotted paths before recursive splitting" 
 }
 
 test "bounded parser handles long adjacent standalone tags without recursive trimming" {
-    const template = try boundedTestTemplate("{{>missing}}" ** 1024 ++ "\n");
+    const source = comptime repeatedTestBytes("{{>missing}}", 1024) ++ [_]u8{'\n'};
+    const template = try boundedTestTemplate(&source);
     defer template.deinit(testing.allocator);
     var writer = Writer.fixed(&.{});
     try renderBounded(template, .{}, &writer, .{});
@@ -4987,8 +4998,10 @@ test "bounded partials reject application callbacks before invocation" {
 }
 
 test "bounded partial map work includes full key comparisons" {
-    const key = "x" ** 63 ++ "z";
-    const template = try boundedTestTemplate("{{>" ++ key ++ "}}");
+    const prefix: [63]u8 = @splat('x');
+    const key = prefix ++ [_]u8{'z'};
+    const source = "{{>".* ++ key ++ "}}".*;
+    const template = try boundedTestTemplate(&source);
     defer template.deinit(testing.allocator);
     var partials = std.StringHashMap(Template).init(testing.allocator);
     defer partials.deinit();
