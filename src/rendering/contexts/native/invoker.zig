@@ -255,19 +255,19 @@ pub fn InvokerType(
                     budget: ?*control.Budget,
                 ) TError!PathResolution {
                     if (!control.spend(budget, 1)) return .chain_broken;
-                    const fields = std.meta.fields(TValue);
-                    inline for (fields) |field| {
-                        if (!control.spend(budget, 1) or !control.spend(budget, @min(field.name.len, current_path_part.len))) return .chain_broken;
-                        if (std.mem.eql(u8, field.name, current_path_part)) {
-                            if (comptime field.is_comptime and !Fields.byValue(field.type)) {
+                    const info = @typeInfo(TValue).@"struct";
+                    inline for (info.field_names, info.field_types, info.field_attrs) |field_name, field_type, field_attrs| {
+                        if (!control.spend(budget, 1) or !control.spend(budget, @min(field_name.len, current_path_part.len))) return .chain_broken;
+                        if (std.mem.eql(u8, field_name, current_path_part)) {
+                            if (comptime field_attrs.@"comptime" and !Fields.byValue(field_type)) {
                                 // Comptime fields have no address in the runtime struct.
                                 // Static storage preserves the borrow through section rendering.
                                 const Static = struct {
-                                    const value: field.type = field.defaultValue().?;
+                                    const value: field_type = field_attrs.defaultValue(field_type).?;
                                 };
                                 return try find(.Leaf, action_param, &Static.value, next_path_parts, index, budget);
                             }
-                            return try find(.Leaf, action_param, Fields.getField(data, field.name), next_path_parts, index, budget);
+                            return try find(.Leaf, action_param, Fields.getField(data, field_name), next_path_parts, index, budget);
                         }
                     } else {
                         if (next_path_parts.len == 0) {
@@ -288,13 +288,13 @@ pub fn InvokerType(
                 ) TError!PathResolution {
                     if (!control.spend(budget, 1)) return .chain_broken;
                     const decls = comptime std.meta.declarations(TValue);
-                    inline for (decls) |decl| {
-                        if (!control.spend(budget, 1) or !control.spend(budget, @min(decl.name.len, current_path_part.len))) return .chain_broken;
-                        const has_fn = comptime meta.hasFn(TValue, decl.name);
+                    inline for (decls) |decl_name| {
+                        if (!control.spend(budget, 1) or !control.spend(budget, @min(decl_name.len, current_path_part.len))) return .chain_broken;
+                        const has_fn = comptime meta.hasFn(TValue, decl_name);
                         if (has_fn) {
-                            const bound_fn = @field(TValue, decl.name);
+                            const bound_fn = @field(TValue, decl_name);
                             const is_valid_lambda = comptime lambda.isValidLambdaFunction(TValue, @TypeOf(bound_fn));
-                            if (std.mem.eql(u8, current_path_part, decl.name)) {
+                            if (std.mem.eql(u8, current_path_part, decl_name)) {
                                 if (is_valid_lambda) {
                                     return try getLambda(
                                         action_param,
@@ -318,7 +318,7 @@ pub fn InvokerType(
                 ) TError!PathResolution {
                     const TData = @TypeOf(data);
                     const TFn = @TypeOf(bound_fn);
-                    const params_len = @typeInfo(TFn).@"fn".params.len;
+                    const params_len = @typeInfo(TFn).@"fn".param_types.len;
 
                     // Lambdas cannot be used for navigation through a path
                     // Examples:
@@ -353,7 +353,7 @@ pub fn InvokerType(
                         .@"struct" => |info| {
                             if (info.is_tuple) {
                                 const derref = comptime stdx.isSingleItemPtr(Data);
-                                inline for (0..info.fields.len) |i| {
+                                inline for (0..info.field_names.len) |i| {
                                     if (!control.spend(budget, 1)) return .chain_broken;
                                     if (index == i) {
                                         return PathResolution{
@@ -593,10 +593,10 @@ pub fn InvokerType(
 // https://github.com/ziglang/zig/issues/2473
 fn isOnErrorSet(comptime Error: type, value: anyerror) bool {
     switch (@typeInfo(Error)) {
-        .error_set => |info| if (info) |errors| {
+        .error_set => |info| if (info.error_names) |error_names| {
             if (@typeInfo(@TypeOf(value)) == .error_set) {
-                inline for (errors) |item| {
-                    const int_value = @intFromError(@field(Error, item.name));
+                inline for (error_names) |error_name| {
+                    const int_value = @intFromError(@field(Error, error_name));
                     if (int_value == @intFromError(value)) return true;
                 }
             }
@@ -641,7 +641,7 @@ test {
 }
 
 const invoker_tests = struct {
-    const Tuple = std.meta.Tuple(&.{ u8, u32, u64 });
+    const Tuple = @Tuple(&.{ u8, u32, u64 });
     const Data = struct {
         a1: struct {
             b1: struct {

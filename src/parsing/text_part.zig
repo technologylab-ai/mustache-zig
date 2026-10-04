@@ -132,7 +132,7 @@ pub fn TextPartType(comptime options: TemplateOptions) type {
             var content = self.content.slice;
             if (content.len == 0) return null;
             const last_index = content.len - 1;
-            if (content[last_index] != @intFromEnum(PartType.delimiters)) return null;
+            if (content[last_index] != @backingInt(PartType.delimiters)) return null;
 
             content = content[0..last_index];
             var iterator = std.mem.tokenizeAny(u8, content, &std.ascii.whitespace);

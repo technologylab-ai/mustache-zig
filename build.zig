@@ -23,7 +23,7 @@ pub fn build(b: *std.Build) void {
     module.addOptions("build_comptime_tests", comptime_tests);
     const verify = b.step("verify", "Run runtime, official core specification, and Zap compatibility tests");
     const check = b.step("check", "Compile verification suites without executing target binaries");
-    const format = b.addFmt(.{ .paths = &.{ "build.zig", "build.zig.zon", "src", "tests" }, .check = true });
+    const format = b.addFmt(.{ .paths = b.pathList(&.{ "build.zig", "build.zig.zon", "src", "tests" }), .check = true });
     verify.dependOn(&format.step);
     check.dependOn(&format.step);
     for ([_][]const u8{ "spec", "zap" }) |name| {
@@ -71,7 +71,7 @@ pub fn build(b: *std.Build) void {
                 "kcov",    "--exclude-pattern",
                 "lib/std", "kcov-output",
             });
-            kcov.addArtifactArg(main_tests);
+            kcov.addArtifactArg2(main_tests, .{});
 
             run_main_tests.step.dependOn(&kcov.step);
         }

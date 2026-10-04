@@ -126,14 +126,14 @@ pub const RenderFromTemplateOptions = struct {
     /// Defines the behavior when rendering a unknown context
     /// Mustache's spec says it must be rendered as an empty string
     /// However, in Debug mode it defaults to `Error` to avoid silently broken contexts.
-    context_misses: ContextMisses = if (builtin.mode == .Debug) .fail else .empty,
+    context_misses: ContextMisses = if (builtin.mode == .debug) .fail else .empty,
 };
 
 pub const RenderFromStringOptions = struct {
     /// Defines the behavior when rendering a unknown context
     /// Mustache's spec says it must be rendered as an empty string
     /// However, in Debug mode it defaults to `Error` to avoid silently broken contexts.
-    context_misses: ContextMisses = if (builtin.mode == .Debug) .fail else .empty,
+    context_misses: ContextMisses = if (builtin.mode == .debug) .fail else .empty,
 
     /// Those options affect both performance and supported Mustache features.
     /// Defaults to full-spec compatible.
@@ -144,7 +144,7 @@ pub const RenderFromFileOptions = struct {
     /// Defines the behavior when rendering a unknown context
     /// Mustache's spec says it must be rendered as an empty string
     /// However, in Debug mode it defaults to `Error` to avoid silently broken contexts.
-    context_misses: ContextMisses = if (builtin.mode == .Debug) .fail else .empty,
+    context_misses: ContextMisses = if (builtin.mode == .debug) .fail else .empty,
 
     /// Define the buffer size for reading the stream
     read_buffer_size: usize = 4 * 1024,

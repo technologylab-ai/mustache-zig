@@ -1,4 +1,4 @@
-name: Zig 0.16 verification
+name: Zig 0.17 verification
 
 on:
   push:
@@ -30,11 +30,12 @@ jobs:
         run: |
           import hashlib, json, os, pathlib, platform, tarfile, urllib.request, zipfile
           version = pathlib.Path('.zig-version').read_text().strip()
-          assert version == '0.16.0'
+          assert version == '0.17.0'
           architecture = {'AMD64': 'x86_64', 'x86_64': 'x86_64', 'arm64': 'aarch64', 'aarch64': 'aarch64'}[platform.machine()]
           system = {'Windows': 'windows', 'Linux': 'linux', 'Darwin': 'macos'}[platform.system()]
-          with urllib.request.urlopen('https://ziglang.org/download/index.json', timeout=30) as response:
-              artifact = json.load(response)[version][f'{architecture}-{system}']
+          metadata = json.loads(pathlib.Path('.github/zig-release.json').read_text())
+          assert metadata['version'] == version
+          artifact = metadata['artifacts'][f'{architecture}-{system}']
           assert artifact['tarball'].startswith('https://ziglang.org/')
           directory = pathlib.Path(os.environ['RUNNER_TEMP']) / 'mustache-zig'
           directory.mkdir()
@@ -58,7 +59,7 @@ jobs:
           packet = pathlib.Path(os.environ['RUNNER_TEMP']) / 'mustache-evidence'
           packet.mkdir()
           (packet / 'environment.txt').write_text(platform.platform() + '\n' + platform.machine() + '\n' + os.environ['GITHUB_SHA'] + '\n' + subprocess.check_output(['zig', 'version'], text=True))
-          for mode in ['Debug', 'ReleaseSafe']:
+          for mode in ['debug', 'safe']:
               result = subprocess.run(['zig', 'build', 'verify', '-Doptimize=' + mode, '-j2', '--summary', 'all'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
               (packet / (mode + '.log')).write_bytes(result.stdout)
               print(result.stdout.decode('utf-8', errors='replace'))

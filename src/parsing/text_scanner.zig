@@ -303,16 +303,16 @@ pub fn TextScannerType(comptime Node: type, comptime options: TemplateOptions) t
 
         fn produceOpen(self: *TextScanner, trimmer: Trimmer, char: u8) ?TextPart {
             const skip_current = switch (char) {
-                @intFromEnum(PartType.comments),
-                @intFromEnum(PartType.section),
-                @intFromEnum(PartType.inverted_section),
-                @intFromEnum(PartType.close_section),
-                @intFromEnum(PartType.partial),
-                @intFromEnum(PartType.parent),
-                @intFromEnum(PartType.block),
-                @intFromEnum(PartType.unescaped_interpolation),
-                @intFromEnum(PartType.delimiters),
-                @intFromEnum(PartType.triple_mustache),
+                @backingInt(PartType.comments),
+                @backingInt(PartType.section),
+                @backingInt(PartType.inverted_section),
+                @backingInt(PartType.close_section),
+                @backingInt(PartType.partial),
+                @backingInt(PartType.parent),
+                @backingInt(PartType.block),
+                @backingInt(PartType.unescaped_interpolation),
+                @backingInt(PartType.delimiters),
+                @backingInt(PartType.triple_mustache),
                 => true,
                 else => false,
             };
@@ -335,7 +335,7 @@ pub fn TextScannerType(comptime Node: type, comptime options: TemplateOptions) t
                     self.state = .{
                         .matching_close = .{
                             .delimiter_index = 0,
-                            .part_type = @as(PartType, @enumFromInt(char)),
+                            .part_type = @as(PartType, @fromBackingInt(@intCast(char))),
                         },
                     };
                 } else {
